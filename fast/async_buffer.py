@@ -11,7 +11,7 @@ async def buffered_reader(
     start: float,
     loop: asyncio.AbstractEventLoop,
     *,
-    chunk_size: int = 8164,
+    chunk_size: int = 1024,
     poll=None
 ):
 

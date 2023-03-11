@@ -31,9 +31,9 @@ def into_asyncio_run(f):
 @click.option(
     "-ull",
     "--upload-limit",
-    default=26843545600,
+    default=26214400,
     help="Upload byte limit for testing. (0 for disabling)",
-    type=click.IntRange(0, 26843545600, max_open=True, clamp=True),
+    type=click.IntRange(0, 26214400, max_open=True, clamp=True),
 )
 @click.option(
     "-uc",
