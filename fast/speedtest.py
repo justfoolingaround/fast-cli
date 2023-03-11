@@ -1,21 +1,14 @@
 import asyncio
-import dataclasses
-import warnings
+from itertools import cycle
 
 import aiohttp
+import humanize
 import yarl
+from rich.live import Live
 
 from .api import NFFastClient
-
-
-@dataclasses.dataclass
-class CurrentSpeedContext:
-
-    target: dict
-    latency: float
-
-    byte_recv_loop_time: float
-    byte_recv_count: int
+from .async_buffer import buffered_reader
+from .utils import ServerwiseContext
 
 
 class FastClientSpeedtest:
@@ -25,71 +18,283 @@ class FastClientSpeedtest:
         self.session = session or aiohttp.ClientSession(loop=self.loop)
 
         self.fastcom_client = NFFastClient(self.session)
+        self.ctxs: "list[ServerwiseContext]" = []
 
-        self.bytes_recv_callbacks = []
-        self.bytes_sent_callbacks = []
+    async def poll_metrics(self, ctx: ServerwiseContext, sent: bool = False):
+        raise NotImplementedError()
 
-        self.bytes_recv = 0
+    async def reset_metrics(self):
+        raise NotImplementedError()
 
-    def add_mutable_callback(self, callback, mutable, *, warn_for_non_blocking=True):
-        if warn_for_non_blocking and not asyncio.iscoroutinefunction(callback):
-            warnings.warn(
-                f"{callback!r} is not a coroutine function. "
-                "This may cause the event loop to block."
-            )
+    async def finalise_metrics(self):
+        raise NotImplementedError()
 
-        mutable.append(callback)
+    @property
+    def download_speed(self):
+        return sum(
+            (ctx.bytes_recv / (ctx.last_bytes_recv_poll - ctx.bytes_recv_start))
+            if ctx.bytes_recv_start
+            and (ctx.last_bytes_recv_poll - ctx.bytes_recv_start)
+            else 0
+            for ctx in self.ctxs
+        )
 
-    def on_bytes_sent(self, callback):
-        self.add_mutable_callback(callback, self.bytes_sent_callbacks)
+    @property
+    def upload_speed(self):
+        return sum(
+            (ctx.bytes_sent / (ctx.last_bytes_sent_poll - ctx.bytes_sent_start))
+            if ctx.bytes_sent_start
+            and (ctx.last_bytes_sent_poll - ctx.bytes_sent_start)
+            else 0
+            for ctx in self.ctxs
+        )
 
-    def on_bytes_recv(self, callback):
-        self.add_mutable_callback(callback, self.bytes_recv_callbacks)
-
-    async def run(self, target, size: int = 26214400, time_limit: float = 10.0):
-
-        url = target["url"]
-        parsed_url = yarl.URL(url)
-
-        parsed_url = parsed_url.with_path(
-            parsed_url.path + f"/range/0-26214400"
-        ).with_query(parsed_url.query)
-
-        byte_recv_local = 0
-        db_by_dt_local = float("inf")
-        initial_down_stream_time = self.loop.time()
+    async def download_into_ctx(
+        self, ctx: ServerwiseContext, size: int = 26214400, time_limit: float = 10.0
+    ):
+        ctx.bytes_recv_start = self.loop.time()
+        upto = ctx.bytes_recv_start + time_limit
 
         for _ in range((size // 26214400) + 1):
             byte_recv_loop_time = self.loop.time()
+            byte_recv_local = 0
 
-            async with self.session.get(parsed_url) as response:
+            async with self.session.get(ctx.url) as response:
 
-                latency = self.loop.time() - byte_recv_loop_time
+                ctx.download_latency = self.loop.time() - byte_recv_loop_time
 
                 async for data in response.content.iter_chunked(1024):
 
                     recv_length = len(data)
 
-                    self.bytes_recv += recv_length
+                    ctx.bytes_recv += recv_length
                     byte_recv_local += recv_length
 
-                    current_ctx = CurrentSpeedContext(
-                        target=target,
-                        latency=latency,
-                        byte_recv_loop_time=initial_down_stream_time,
-                        byte_recv_count=self.bytes_recv,
-                    )
+                    ctx.last_bytes_recv_poll = self.loop.time()
+                    self.loop.create_task(self.poll_metrics(ctx))
 
-                    for callback in self.bytes_recv_callbacks:
-                        self.loop.create_task(callback(current_ctx))
+                    if self.loop.time() > upto or byte_recv_local >= size:
+                        return
 
-                    pure_time = self.loop.time() - initial_down_stream_time - latency
+    async def upload_into_ctx(
+        self, ctx: ServerwiseContext, size: int = 26214400, time_limit: float = 10.0
+    ):
 
-                    db_by_dt_local = (
-                        (byte_recv_local / pure_time) if pure_time else float("inf")
-                    )
+        ctx.bytes_sent_start = self.loop.time()
+        upto = ctx.bytes_sent_start + time_limit
 
-                    if pure_time > time_limit or byte_recv_local >= size:
-                        return db_by_dt_local
+        task = self.loop.create_task(
+            self.session.post(
+                ctx.url,
+                data=buffered_reader(
+                    ctx,
+                    size,
+                    upto,
+                    ctx.bytes_sent_start,
+                    self.loop,
+                    poll=self.poll_metrics,
+                ),
+                headers={
+                    "Content-Length": str(size),
+                },
+            ).__aenter__()
+        )
+        await asyncio.sleep(upto - self.loop.time())
+        await self.session.close()
 
-        return db_by_dt_local
+        task.cancel()
+
+    async def run(
+        self,
+        targets: list,
+        do_download: bool = True,
+        do_upload: bool = True,
+        connections: int = 1,
+        *,
+        download_size: int = 26214400,
+        download_time_limit: float = 10.0,
+        upload_size: int = 26214400,
+        upload_time_limit: float = 10.0,
+    ):
+
+        if not do_download and not do_upload:
+            raise ValueError(
+                "You need to specify at least one of do_download and do_upload."
+            )
+
+        assigned = 0
+        target_cycle = cycle(targets)
+
+        while assigned < connections:
+            target = next(target_cycle)
+
+            parsed_url = yarl.URL(target["url"])
+
+            parsed_url = parsed_url.with_path(
+                parsed_url.path + f"/range/0-26214400"
+            ).with_query(parsed_url.query)
+
+            ctx = ServerwiseContext(
+                name=", ".join(target["location"].values()),
+                url=parsed_url,
+                bytes_recv_span=download_time_limit,
+                bytes_sent_span=upload_time_limit,
+            )
+
+            self.ctxs.append(ctx)
+            assigned += 1
+
+        if do_download:
+            await asyncio.gather(
+                *(
+                    self.download_into_ctx(ctx, download_size, download_time_limit)
+                    for ctx in self.ctxs
+                )
+            )
+
+        if do_upload:
+            await asyncio.gather(
+                *(
+                    self.upload_into_ctx(ctx, upload_size, upload_time_limit)
+                    for ctx in self.ctxs
+                )
+            )
+
+        await self.finalise_metrics()
+
+
+class FastClientSpeedTestRich(FastClientSpeedtest):
+
+    signs = {"upload": "↑", "download": "↓"}
+
+    def __init__(
+        self, console, bits, loop=None, session: "aiohttp.ClientSession" = None
+    ):
+        self.console = console
+        self.active_live = None
+
+        self.bits = bits
+
+        super().__init__(loop, session)
+
+    async def poll_metrics(self, ctx: ServerwiseContext, sent: bool = False):
+
+        if self.active_live is None:
+            self.active_live = Live(console=self.console, auto_refresh=True).__enter__()
+
+        event = "upload" if sent else "download"
+        latency = ctx.upload_latency if sent else ctx.download_latency
+
+        if not latency:
+            if any(
+                ctx.upload_latency if sent else ctx.download_latency
+                for ctx in self.ctxs
+            ):
+                return
+
+            return self.active_live.update(
+                f"Waiting for a {event} connection to establish."
+            )
+
+        completes_in = (
+            (ctx.bytes_sent_span - (self.loop.time() - ctx.bytes_sent_start))
+            if sent
+            else (ctx.bytes_recv_span - (self.loop.time() - ctx.bytes_recv_start))
+        )
+
+        if sent:
+            db_by_dt = self.upload_speed
+        else:
+            db_by_dt = self.download_speed
+
+        if self.bits:
+            db_by_dt *= 8
+
+        self.active_live.update(
+            f"{self.signs[event]} {humanize.naturalsize(db_by_dt, binary=self.bits)}/s "
+            f"\[connections: {len(self.ctxs)}"
+            f", completes in {humanize.naturaldelta(completes_in)}"
+            f", connection latency: {latency * 1000:.2f}ms"
+            f"]"
+        )
+
+    async def reset_metrics(self, update_with="\r"):
+        if self.active_live is not None:
+            self.active_live.update(update_with)
+            self.active_live.__exit__(None, None, None)
+            self.active_live = None
+
+    async def finalise_metrics(self):
+        if not (self.download_speed or self.upload_speed):
+            return await self.reset_metrics("Nothing to report.")
+
+        speed_data = []
+        traffic_data = []
+
+        latency_data = []
+
+        if self.bits:
+            db_by_dt = self.download_speed * 8
+        else:
+            db_by_dt = self.download_speed
+
+        if self.download_speed:
+
+            lowest_latency = min(self.ctxs, key=lambda ctx: ctx.download_latency)
+            highest_latency = max(self.ctxs, key=lambda ctx: ctx.download_latency)
+            average_latency = sum(ctx.download_latency for ctx in self.ctxs) / len(
+                self.ctxs
+            )
+
+            latency_data.append(
+                f"{self.signs['download']} {lowest_latency.download_latency * 1000:.2f}-{highest_latency.download_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms, farthest: {highest_latency.name}, nearest: {lowest_latency.name})"
+            )
+
+            speed_data.append(
+                f"{self.signs['download']} {humanize.naturalsize(db_by_dt, binary=self.bits)}/s"
+            )
+
+            total = sum(ctx.bytes_recv for ctx in self.ctxs)
+
+            traffic_data.append(
+                f"{self.signs['download']} {humanize.naturalsize(total, binary=self.bits)} ({total * (1 if not self.bits else 8)} {'bits' if self.bits else 'bytes'})"
+            )
+
+        if self.bits:
+            db_by_dt = self.upload_speed * 8
+        else:
+            db_by_dt = self.upload_speed
+
+        if self.upload_speed:
+
+            lowest_latency = min(self.ctxs, key=lambda ctx: ctx.upload_latency)
+            highest_latency = max(self.ctxs, key=lambda ctx: ctx.upload_latency)
+            average_latency = sum(ctx.upload_latency for ctx in self.ctxs) / len(
+                self.ctxs
+            )
+
+            latency_data.append(
+                f"{self.signs['upload']} {lowest_latency.upload_latency * 1000:.2f}-{highest_latency.upload_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms, farthest: {highest_latency.name}, nearest: {lowest_latency.name})"
+            )
+
+            speed_data.append(
+                f"{self.signs['upload']} {humanize.naturalsize(db_by_dt, binary=self.bits)}/s"
+            )
+
+            total = sum(ctx.bytes_sent for ctx in self.ctxs)
+
+            traffic_data.append(
+                f"{self.signs['upload']} {humanize.naturalsize(total, binary=self.bits)} ({total * (1 if not self.bits else 8)} {'bits' if self.bits else 'bytes'})"
+            )
+
+        await self.reset_metrics(" ".join(speed_data))
+
+        self.console.print("Latency (server response time):")
+
+        for line in latency_data:
+            self.console.print("\t" + line)
+
+        self.console.print("Traffic:")
+
+        for line in traffic_data:
+            self.console.print("\t" + line)
