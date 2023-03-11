@@ -99,8 +99,8 @@ class FastClientSpeedtest:
                 },
             ).__aenter__()
         )
+
         await asyncio.sleep(upto - self.loop.time())
-        await self.session.close()
 
         task.cancel()
 
@@ -160,6 +160,7 @@ class FastClientSpeedtest:
                 )
             )
 
+        await self.session.close()
         await self.finalise_metrics()
 
 

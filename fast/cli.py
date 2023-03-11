@@ -22,17 +22,24 @@ def into_asyncio_run(f):
 
 @click.command()
 @click.option(
-    "-l",
-    "--limit",
+    "-dll",
+    "--download-limit",
     default=26843545600,
-    help="Byte limit for testing.",
-    type=click.IntRange(2093058, 26843545600, clamp=True, max_open=True, min_open=True),
+    help="Download byte limit for testing. (0 for disabling)",
+    type=click.IntRange(0, 26843545600, max_open=True, clamp=True),
+)
+@click.option(
+    "-ull",
+    "--upload-limit",
+    default=26843545600,
+    help="Upload byte limit for testing. (0 for disabling)",
+    type=click.IntRange(0, 26843545600, max_open=True, clamp=True),
 )
 @click.option(
     "-uc",
     "--url-count",
     default=5,
-    type=click.IntRange(1, 5, clamp=True, max_open=True, min_open=True),
+    type=click.IntRange(1, 5, clamp=True),
     help="Number of URLs to fetch.",
 )
 @click.option(
@@ -58,7 +65,8 @@ def into_asyncio_run(f):
 )
 @into_asyncio_run
 async def __fastcom_speedtesting__(
-    limit: int,
+    download_limit: int,
+    upload_limit: int,
     url_count: int,
     connections: int,
     time_limit: float,
@@ -97,6 +105,10 @@ async def __fastcom_speedtesting__(
         fastcom_client.run(
             targets=targets,
             connections=connections,
+            do_download=download_limit > 0,
+            do_upload=upload_limit > 0,
+            download_size=download_limit,
+            upload_size=upload_limit,
             download_time_limit=time_limit,
             upload_time_limit=time_limit,
         )
