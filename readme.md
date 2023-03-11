@@ -19,6 +19,11 @@ Python command-line implementation of [Netflix (`Fast.com`)](https://www.fast.co
 - Fast initialisation.
     - This isn't Rust, but isn't a full blown browser either. Plus, this one does not even need to query the site, just the APIs.
 - Makes you look cooler at the University Library (it doesn't, nerd).
+- Supports uploading.
+    - Better than nearly all of open-source projects in terms of code.
+- Supports sharing.
+    - Uses [Ookla Speedtest](https://www.speedtest.net/)'s sharing features (speed test is speed test everywhere!).
+
 
 ## Usage 
 
@@ -27,13 +32,18 @@ $ fast-cli --help
 Usage: fast-cli [OPTIONS]
 
 Options:
-  -l, --limit INTEGER RANGE       Byte limit for testing.
-                                  [2093058<x<26843545600]
-  -uc, --url-count INTEGER RANGE  Number of URLs to fetch.  [1<x<5]
+  -dll, --download-limit INTEGER RANGE
+                                  Download byte limit for testing. (0 for
+                                  disabling)  [0<=x<26843545600]
+  -ull, --upload-limit INTEGER RANGE
+                                  Upload byte limit for testing. (0 for
+                                  disabling)  [0<=x<26843545600]
+  -uc, --url-count INTEGER RANGE  Number of URLs to fetch.  [1<=x<=5]
   -c, --connections INTEGER       Number of connections to use. (5 is optimal)
   -t, --time-limit FLOAT          Time limit for testing.
   -8, --bits                      Use bits instead of bytes for speed
                                   calculations.
   -p, --private                   Use private mode for testing.
+  -s, --share                     Share results after testing.
   --help                          Show this message and exit.
 ```
