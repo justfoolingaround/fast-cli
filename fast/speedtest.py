@@ -1,4 +1,5 @@
 import asyncio
+from hashlib import md5
 from itertools import cycle
 
 import aiohttp
@@ -9,6 +10,9 @@ from rich.live import Live
 from .api import NFFastClient
 from .async_buffer import buffered_reader
 from .utils import ServerwiseContext
+
+SPEEDTEST_NET_BASE = "https://www.speedtest.net/"
+SPEEDTEST_NY_SERVER_ID = 10562
 
 
 class FastClientSpeedtest:
@@ -169,13 +173,21 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
     signs = {"upload": "↑", "download": "↓"}
 
     def __init__(
-        self, console, bits, private, loop=None, session: "aiohttp.ClientSession" = None
+        self,
+        console,
+        bits,
+        private,
+        share,
+        loop=None,
+        session: "aiohttp.ClientSession" = None,
     ):
         self.console = console
         self.active_live = None
 
         self.bits = bits
         self.private = private
+
+        self.share = share
 
         super().__init__(loop, session)
 
@@ -269,30 +281,30 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
             )
 
         if self.bits:
-            db_by_dt = self.upload_speed * 8
+            upload_db_by_dt = self.upload_speed * 8
         else:
-            db_by_dt = self.upload_speed
+            upload_db_by_dt = self.upload_speed
 
         if self.upload_speed:
 
-            lowest_latency = min(self.ctxs, key=lambda ctx: ctx.upload_latency)
-            highest_latency = max(self.ctxs, key=lambda ctx: ctx.upload_latency)
-            average_latency = sum(ctx.upload_latency for ctx in self.ctxs) / len(
+            lowest_upload_latency = min(self.ctxs, key=lambda ctx: ctx.upload_latency)
+            highest_upload_latency = max(self.ctxs, key=lambda ctx: ctx.upload_latency)
+            average_upload_latency = sum(ctx.upload_latency for ctx in self.ctxs) / len(
                 self.ctxs
             )
 
             latency_delta_string = (
-                f", farthest: {highest_latency.name}, nearest: {lowest_latency.name}"
+                f", farthest: {highest_upload_latency.name}, nearest: {lowest_upload_latency.name}"
                 if not self.private
                 else ""
             )
 
             latency_data.append(
-                f"{self.signs['upload']} {lowest_latency.upload_latency * 1000:.2f}-{highest_latency.upload_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms{latency_delta_string})"
+                f"{self.signs['upload']} {lowest_upload_latency.upload_latency * 1000:.2f}-{highest_upload_latency.upload_latency * 1000:.2f}ms (Average: {average_upload_latency * 1000:.2f}ms{latency_delta_string})"
             )
 
             speed_data.append(
-                f"{self.signs['upload']} {humanize.naturalsize(db_by_dt, binary=self.bits)}/s"
+                f"{self.signs['upload']} {humanize.naturalsize(upload_db_by_dt, binary=self.bits)}/s"
             )
 
             total = sum(ctx.bytes_sent for ctx in self.ctxs)
@@ -312,3 +324,47 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
 
         for line in traffic_data:
             self.console.print("\t" + line)
+
+        if self.share:
+            speedtest_session = aiohttp.ClientSession()
+
+            if self.private:
+                server_id = SPEEDTEST_NY_SERVER_ID
+            else:
+                async with speedtest_session.get(
+                    SPEEDTEST_NET_BASE + "api/js/servers"
+                ) as response:
+                    server_id = (await response.json() or [{}])[0].get(
+                        "id", SPEEDTEST_NY_SERVER_ID
+                    )
+
+            download_in_kilos = int(db_by_dt * 8 // 1000)
+            upload_in_kilos = (upload_db_by_dt * 8 // 1000) or 1
+            ping = int(lowest_latency.download_latency * 1000)
+
+            data = {
+                "serverid": server_id,
+                "ping": ping,
+                "download": download_in_kilos,
+                "upload": upload_in_kilos,
+                "hash": md5(
+                    f"{ping}-{upload_in_kilos}-{download_in_kilos}-817d699764d33f89c".encode()
+                ).hexdigest(),
+            }
+
+            headers = {
+                "referer": SPEEDTEST_NET_BASE,
+                "accept": "application/json",
+            }
+
+            if self.private:
+                headers["CLIENT-IP"] = "1.1.1.1"
+
+            async with speedtest_session.post(
+                SPEEDTEST_NET_BASE + "api/results.php", json=data, headers=headers
+            ) as response:
+                self.console.print(
+                    f"Shareable url: {SPEEDTEST_NET_BASE}result/{(await response.json(content_type=None))['resultid']}"
+                )
+
+            await speedtest_session.close()

@@ -63,6 +63,12 @@ def into_asyncio_run(f):
     is_flag=True,
     help="Use private mode for testing.",
 )
+@click.option(
+    "-s",
+    "--share",
+    is_flag=True,
+    help="Share results after testing.",
+)
 @into_asyncio_run
 async def __fastcom_speedtesting__(
     download_limit: int,
@@ -72,11 +78,8 @@ async def __fastcom_speedtesting__(
     time_limit: float,
     bits: bool,
     private: bool,
+    share: bool,
 ):
-
-    unit = "bits" if bits else "bytes"
-
-    loop = asyncio.get_event_loop()
 
     sys.stderr = sys.__stderr__
 
@@ -89,6 +92,7 @@ async def __fastcom_speedtesting__(
         console=console,
         bits=bits,
         private=private,
+        share=share,
     )
 
     data = await fastcom_client.fastcom_client.fetch_urls(url_count=url_count)
