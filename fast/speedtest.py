@@ -168,12 +168,13 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
     signs = {"upload": "↑", "download": "↓"}
 
     def __init__(
-        self, console, bits, loop=None, session: "aiohttp.ClientSession" = None
+        self, console, bits, private, loop=None, session: "aiohttp.ClientSession" = None
     ):
         self.console = console
         self.active_live = None
 
         self.bits = bits
+        self.private = private
 
         super().__init__(loop, session)
 
@@ -246,8 +247,14 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
                 self.ctxs
             )
 
+            latency_delta_string = (
+                f", farthest: {highest_latency.name}, nearest: {lowest_latency.name}"
+                if not self.private
+                else ""
+            )
+
             latency_data.append(
-                f"{self.signs['download']} {lowest_latency.download_latency * 1000:.2f}-{highest_latency.download_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms, farthest: {highest_latency.name}, nearest: {lowest_latency.name})"
+                f"{self.signs['download']} {lowest_latency.download_latency * 1000:.2f}-{highest_latency.download_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms{latency_delta_string})"
             )
 
             speed_data.append(
@@ -273,8 +280,14 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
                 self.ctxs
             )
 
+            latency_delta_string = (
+                f", farthest: {highest_latency.name}, nearest: {lowest_latency.name}"
+                if not self.private
+                else ""
+            )
+
             latency_data.append(
-                f"{self.signs['upload']} {lowest_latency.upload_latency * 1000:.2f}-{highest_latency.upload_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms, farthest: {highest_latency.name}, nearest: {lowest_latency.name})"
+                f"{self.signs['upload']} {lowest_latency.upload_latency * 1000:.2f}-{highest_latency.upload_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms{latency_delta_string})"
             )
 
             speed_data.append(

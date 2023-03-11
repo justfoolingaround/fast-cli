@@ -80,6 +80,7 @@ async def __fastcom_speedtesting__(
     fastcom_client = FastClientSpeedTestRich(
         console=console,
         bits=bits,
+        private=private,
     )
 
     data = await fastcom_client.fastcom_client.fetch_urls(url_count=url_count)
