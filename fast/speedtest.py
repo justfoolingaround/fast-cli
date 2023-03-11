@@ -339,7 +339,7 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
                     )
 
             download_in_kilos = int(db_by_dt * 8 // 1000)
-            upload_in_kilos = (upload_db_by_dt * 8 // 1000) or 1
+            upload_in_kilos = int(upload_db_by_dt * 8 // 1000) or 1
             ping = int(lowest_latency.download_latency * 1000)
 
             data = {
