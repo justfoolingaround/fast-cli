@@ -6,13 +6,11 @@ import aiohttp
 import humanize
 import yarl
 from rich.live import Live
+from rich.text import Text
 
 from .api import NFFastClient
 from .async_buffer import buffered_reader
-from .utils import ServerwiseContext
-
-SPEEDTEST_NET_BASE = "https://www.speedtest.net/"
-SPEEDTEST_NY_SERVER_ID = 10562
+from .utils import ServerwiseContext, fetch_formatted_data, share
 
 
 class FastClientSpeedtest:
@@ -53,6 +51,18 @@ class FastClientSpeedtest:
             for ctx in self.ctxs
         )
 
+    @property
+    def lowest_latency(self):
+        return (
+            (
+                min(ctx.download_latency for ctx in self.ctxs)
+                if self.download_speed
+                else min(ctx.upload_latency for ctx in self.ctxs)
+            )
+            if self.ctxs
+            else 0
+        )
+
     async def download_into_ctx(
         self, ctx: ServerwiseContext, size: int = 26214400, time_limit: float = 10.0
     ):
@@ -74,7 +84,6 @@ class FastClientSpeedtest:
                     ctx.bytes_recv += recv_length
                     byte_recv_local += recv_length
 
-                    ctx.last_bytes_recv_poll = self.loop.time()
                     self.loop.create_task(self.poll_metrics(ctx))
 
                     if self.loop.time() > upto or byte_recv_local >= size:
@@ -84,8 +93,9 @@ class FastClientSpeedtest:
         self, ctx: ServerwiseContext, size: int = 26214400, time_limit: float = 10.0
     ):
 
-        ctx.bytes_sent_start = self.loop.time()
-        upto = ctx.bytes_sent_start + time_limit
+        ctx.bytes_sent_span = time_limit
+
+        future = asyncio.Future()
 
         task = self.loop.create_task(
             self.session.post(
@@ -93,9 +103,9 @@ class FastClientSpeedtest:
                 data=buffered_reader(
                     ctx,
                     size,
-                    upto,
-                    ctx.bytes_sent_start,
+                    self.loop.time(),
                     self.loop,
+                    future,
                     poll=self.poll_metrics,
                 ),
                 headers={
@@ -104,9 +114,8 @@ class FastClientSpeedtest:
             ).__aenter__()
         )
 
-        await asyncio.sleep(upto - self.loop.time())
-
-        task.cancel()
+        future.add_done_callback(task.cancel)
+        await future
 
     async def run(
         self,
@@ -178,6 +187,7 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
         bits,
         private,
         share,
+        less_verbose,
         loop=None,
         session: "aiohttp.ClientSession" = None,
     ):
@@ -188,16 +198,24 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
         self.private = private
 
         self.share = share
+        self.less_verbose = less_verbose
 
         super().__init__(loop, session)
 
     async def poll_metrics(self, ctx: ServerwiseContext, sent: bool = False):
+
+        if sent:
+            ctx.last_bytes_sent_poll = self.loop.time()
+        else:
+            ctx.last_bytes_recv_poll = self.loop.time()
 
         if self.active_live is None:
             self.active_live = Live(console=self.console, auto_refresh=True).__enter__()
 
         event = "upload" if sent else "download"
         latency = ctx.upload_latency if sent else ctx.download_latency
+
+        now = self.loop.time()
 
         if not latency:
             if any(
@@ -211,26 +229,61 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
             )
 
         completes_in = (
-            (ctx.bytes_sent_span - (self.loop.time() - ctx.bytes_sent_start))
+            (ctx.bytes_sent_span - (now - ctx.bytes_sent_start))
             if sent
-            else (ctx.bytes_recv_span - (self.loop.time() - ctx.bytes_recv_start))
+            else (ctx.bytes_recv_span - (now - ctx.bytes_recv_start))
         )
 
         if sent:
+
             db_by_dt = self.upload_speed
+
+            _, peak_send_rate = ctx.peak_send_rate
+            if peak_send_rate < db_by_dt:
+                ctx.peak_send_rate = now - ctx.bytes_sent_start, db_by_dt
+
         else:
             db_by_dt = self.download_speed
+
+            _, peak_recv_rate = ctx.peak_recv_rate
+            if peak_recv_rate < db_by_dt:
+                ctx.peak_recv_rate = now - ctx.bytes_recv_start, db_by_dt
 
         if self.bits:
             db_by_dt *= 8
 
-        self.active_live.update(
-            f"{self.signs[event]} {humanize.naturalsize(db_by_dt, binary=self.bits)}/s "
-            f"\[connections: {len(self.ctxs)}"
-            f", completes in {humanize.naturaldelta(completes_in)}"
-            f", connection latency: {latency * 1000:.2f}ms"
-            f"]"
-        )
+        speed_data = []
+
+        if self.download_speed:
+            text = f"{self.signs['download']} {humanize.naturalsize(self.download_speed * (8 if self.bits else 1), binary=self.bits)}/s"
+            if not sent:
+                text = f"[green]{text}[/]"
+            else:
+                text = f"[dim]{text}[/]"
+
+            speed_data.append(text)
+
+        if self.upload_speed:
+            text = f"{self.signs['upload']} {humanize.naturalsize(self.upload_speed  * (8 if self.bits else 1), binary=self.bits)}/s"
+
+            if sent:
+                text = f"[green]{text}[/]"
+            else:
+                text = f"[dim]{text}[/]"
+
+            speed_data.append(text)
+
+        suffix = ""
+
+        if not self.less_verbose:
+            suffix = (
+                f" \[connections: {len(self.ctxs)}"
+                f", completes in {humanize.naturaldelta(completes_in)}"
+                f", connection latency: {latency * 1000:.2f}ms"
+                f"]"
+            )
+
+        self.active_live.update(" ".join(speed_data) + suffix)
 
     async def reset_metrics(self, update_with="\r"):
         if self.active_live is not None:
@@ -246,11 +299,7 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
         traffic_data = []
 
         latency_data = []
-
-        if self.bits:
-            db_by_dt = self.download_speed * 8
-        else:
-            db_by_dt = self.download_speed
+        lowest_latency = 0
 
         if self.download_speed:
 
@@ -259,112 +308,78 @@ class FastClientSpeedTestRich(FastClientSpeedtest):
             average_latency = sum(ctx.download_latency for ctx in self.ctxs) / len(
                 self.ctxs
             )
-
-            latency_delta_string = (
-                f", farthest: {highest_latency.name}, nearest: {lowest_latency.name}"
-                if not self.private
-                else ""
+            peak_at, peak = max(
+                (ctx.peak_recv_rate for ctx in self.ctxs), key=lambda x: x[1]
             )
-
-            latency_data.append(
-                f"{self.signs['download']} {lowest_latency.download_latency * 1000:.2f}-{highest_latency.download_latency * 1000:.2f}ms (Average: {average_latency * 1000:.2f}ms{latency_delta_string})"
-            )
-
-            speed_data.append(
-                f"{self.signs['download']} {humanize.naturalsize(db_by_dt, binary=self.bits)}/s"
-            )
-
             total = sum(ctx.bytes_recv for ctx in self.ctxs)
 
-            traffic_data.append(
-                f"{self.signs['download']} {humanize.naturalsize(total, binary=self.bits)} ({total * (1 if not self.bits else 8)} {'bits' if self.bits else 'bytes'})"
+            data = fetch_formatted_data(
+                self.signs["download"],
+                lowest_latency.download_latency,
+                highest_latency.download_latency,
+                lowest_latency.name,
+                highest_latency.name,
+                average_latency,
+                total,
+                peak,
+                peak_at,
+                self.download_speed,
+                self.bits,
+                self.private,
+                self.less_verbose,
             )
 
-        if self.bits:
-            upload_db_by_dt = self.upload_speed * 8
-        else:
-            upload_db_by_dt = self.upload_speed
+            latency_data.append(data.latency)
+            speed_data.append(data.speed)
+            traffic_data.append(data.traffic)
 
         if self.upload_speed:
 
-            lowest_upload_latency = min(self.ctxs, key=lambda ctx: ctx.upload_latency)
-            highest_upload_latency = max(self.ctxs, key=lambda ctx: ctx.upload_latency)
-            average_upload_latency = sum(ctx.upload_latency for ctx in self.ctxs) / len(
+            lowest_latency = min(self.ctxs, key=lambda ctx: ctx.upload_latency)
+            highest_latency = max(self.ctxs, key=lambda ctx: ctx.upload_latency)
+            average_latency = sum(ctx.upload_latency for ctx in self.ctxs) / len(
                 self.ctxs
             )
-
-            latency_delta_string = (
-                f", farthest: {highest_upload_latency.name}, nearest: {lowest_upload_latency.name}"
-                if not self.private
-                else ""
+            peak_at, peak = max(
+                (ctx.peak_send_rate for ctx in self.ctxs), key=lambda x: x[1]
             )
-
-            latency_data.append(
-                f"{self.signs['upload']} {lowest_upload_latency.upload_latency * 1000:.2f}-{highest_upload_latency.upload_latency * 1000:.2f}ms (Average: {average_upload_latency * 1000:.2f}ms{latency_delta_string})"
-            )
-
-            speed_data.append(
-                f"{self.signs['upload']} {humanize.naturalsize(upload_db_by_dt, binary=self.bits)}/s"
-            )
-
             total = sum(ctx.bytes_sent for ctx in self.ctxs)
 
-            traffic_data.append(
-                f"{self.signs['upload']} {humanize.naturalsize(total, binary=self.bits)} ({total * (1 if not self.bits else 8)} {'bits' if self.bits else 'bytes'})"
+            data = fetch_formatted_data(
+                self.signs["upload"],
+                lowest_latency.upload_latency,
+                highest_latency.upload_latency,
+                lowest_latency.name,
+                highest_latency.name,
+                average_latency,
+                total,
+                peak,
+                peak_at,
+                self.upload_speed,
+                self.bits,
+                self.private,
+                self.less_verbose,
             )
 
-        await self.reset_metrics(" ".join(speed_data))
+            latency_data.append(data.latency)
+            speed_data.append(data.speed)
+            traffic_data.append(data.traffic)
 
-        self.console.print("Latency (server response time):")
+        await self.reset_metrics(Text(" ".join(speed_data)))
 
-        for line in latency_data:
-            self.console.print("\t" + line)
+        if not self.less_verbose:
 
-        self.console.print("Traffic:")
+            self.console.print("Latency (server response time):")
 
-        for line in traffic_data:
-            self.console.print("\t" + line)
+            for line in latency_data:
+                self.console.print("\t" + line)
+
+            self.console.print("Traffic:")
+
+            for line in traffic_data:
+                self.console.print("\t" + line)
 
         if self.share:
-            speedtest_session = aiohttp.ClientSession()
-
-            if self.private:
-                server_id = SPEEDTEST_NY_SERVER_ID
-            else:
-                async with speedtest_session.get(
-                    SPEEDTEST_NET_BASE + "api/js/servers"
-                ) as response:
-                    server_id = (await response.json() or [{}])[0].get(
-                        "id", SPEEDTEST_NY_SERVER_ID
-                    )
-
-            download_in_kilos = int(db_by_dt * 8 // 1000)
-            upload_in_kilos = int(upload_db_by_dt * 8 // 1000) or 1
-            ping = int(lowest_latency.download_latency * 1000)
-
-            data = {
-                "serverid": server_id,
-                "ping": ping,
-                "download": download_in_kilos,
-                "upload": upload_in_kilos,
-                "hash": md5(
-                    f"{ping}-{upload_in_kilos}-{download_in_kilos}-817d699764d33f89c".encode()
-                ).hexdigest(),
-            }
-
-            headers = {
-                "referer": SPEEDTEST_NET_BASE,
-                "accept": "application/json",
-            }
-
-            if self.private:
-                headers["CLIENT-IP"] = "1.1.1.1"
-
-            async with speedtest_session.post(
-                SPEEDTEST_NET_BASE + "api/results.php", json=data, headers=headers
-            ) as response:
-                self.console.print(
-                    f"Shareable url: {SPEEDTEST_NET_BASE}result/{(await response.json(content_type=None))['resultid']}"
-                )
-
-            await speedtest_session.close()
+            self.console.print(
+                f"Shareable url: {await share(self.download_speed, self.upload_speed, self.lowest_latency, private_mode=self.private)}"
+            )

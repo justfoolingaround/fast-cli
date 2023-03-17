@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "fast-cli"
-version = "0.2.4"
+version = "0.3.0"
 description = "Fastest and highly accurate internet speed testing client."
 authors = ["justfoolingaround <kr.justfoolingaround@gmail.com>"]
 packages = [{ include = "fast" }, { include = "fast/**/*.py" }]

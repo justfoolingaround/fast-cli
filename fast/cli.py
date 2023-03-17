@@ -69,6 +69,12 @@ def into_asyncio_run(f):
     is_flag=True,
     help="Share results after testing.",
 )
+@click.option(
+    "-m",
+    "--minimalist",
+    is_flag=True,
+    help="Go minimal with minimalistic mode.",
+)
 @into_asyncio_run
 async def __fastcom_speedtesting__(
     download_limit: int,
@@ -79,6 +85,7 @@ async def __fastcom_speedtesting__(
     bits: bool,
     private: bool,
     share: bool,
+    minimalist: bool,
 ):
 
     sys.stderr = sys.__stderr__
@@ -93,12 +100,13 @@ async def __fastcom_speedtesting__(
         bits=bits,
         private=private,
         share=share,
+        less_verbose=minimalist,
     )
 
     data = await fastcom_client.fastcom_client.fetch_urls(url_count=url_count)
     client = data["client"]
 
-    if not private:
+    if not private and not minimalist:
         console.print(
             f"Server reported client @ {client['location']['city']}, {client['location']['country']} [{client['ip']}]."
         )

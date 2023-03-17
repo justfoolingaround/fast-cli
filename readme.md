@@ -10,6 +10,9 @@ Python command-line implementation of [Netflix (`Fast.com`)](https://www.fast.co
     - Less time, less precise but just.. quick.
 - **You**, as a user, can select how much bytes this downloads.
     - Testing mobile connections without an abysmal amount of charge.
+- **You**, as a user, can control exactly what is shown.
+    - Minimalistic mode (`-m`) only shows you the live metrics.
+    - Private mode (`-p`) shows you everything **but** your IPv4/IPv6 address and nearby server locations.
 - Uses bytes as unit by default.
     - Usually, speed-tests use bits to make the user feel good but we both know you deserve more sadness. (`-8` flag to switch to bits.)
 - Allows you to hide locations.
@@ -18,7 +21,6 @@ Python command-line implementation of [Netflix (`Fast.com`)](https://www.fast.co
     - Unlike other speed-tests, this client **only** times when the bytes are being recieved.
 - Fast initialisation.
     - This isn't Rust, but isn't a full blown browser either. Plus, this one does not even need to query the site, just the APIs.
-- Makes you look cooler at the University Library (it doesn't, nerd).
 - Supports uploading.
     - Better than nearly all of open-source projects in terms of code.
 - Supports sharing.
@@ -37,7 +39,7 @@ Options:
                                   disabling)  [0<=x<26843545600]
   -ull, --upload-limit INTEGER RANGE
                                   Upload byte limit for testing. (0 for
-                                  disabling)  [0<=x<26843545600]
+                                  disabling)  [0<=x<26214400]
   -uc, --url-count INTEGER RANGE  Number of URLs to fetch.  [1<=x<=5]
   -c, --connections INTEGER       Number of connections to use. (5 is optimal)
   -t, --time-limit FLOAT          Time limit for testing.
@@ -45,5 +47,6 @@ Options:
                                   calculations.
   -p, --private                   Use private mode for testing.
   -s, --share                     Share results after testing.
+  -m, --minimalist                Go minimal with minimalistic mode.
   --help                          Show this message and exit.
 ```
